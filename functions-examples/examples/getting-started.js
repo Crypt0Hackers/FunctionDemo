@@ -3,42 +3,66 @@ const {
   ReturnType,
   decodeResult,
   FulfillmentCode,
+  SecretsManager
 } = require("@chainlink/functions-toolkit");
 const functionsConsumerAbi = require("../abi/functionsClient.json");
 const ethers = require("ethers");
 require("@chainlink/env-enc").config();
+const fs = require("fs");
+const path = require("path");
 
-const consumerAddress = "0x8dFf78B7EE3128D00E90611FBeD20A71397064D9"; // REPLACE this with your Functions consumer address
-const subscriptionId = 3; // REPLACE this with your subscription ID
+
+///////////////////////////////////// CHANGE THESE ///////////////////////////////////// 
+const consumerAddress = "0xb670Bf91d2EB8Ddd543CF2Db633166ab8Cb427C9"; // REPLACE this with your Functions consumer address
+const subscriptionId = 422; // REPLACE this with your subscription ID
+const secrets = { apiKey: process.env.OPENAI_KEY }
+const args = ["tell me a dad joke"];
 
 // hardcoded for Polygon Mumbai
 const makeRequestMumbai = async () => {
   const routerAddress = "0x6E2dc0F9DB014aE19888F539E59285D2Ea04244C";
   const donId = "fun-polygon-mumbai-1";
   const explorerUrl = "https://mumbai.polygonscan.com";
+  const slotIdNumber = 0; // slot ID where to upload the secrets
+  const gatewayUrls = [
+    "https://01.functions-gateway.testnet.chain.link/",
+    "https://02.functions-gateway.testnet.chain.link/",
+  ];
+  const expirationTimeMinutes = 15; // expiration time in minutes of the secrets
 
-  const source = `
-  // calculate sum off-chain by a DON then return the result
-  // values provided in args array
+  //   const source = `
+  //   const prompt = args[0];
 
-  console.log(\`calculate sum of \${args}\`);
+  //   if (!secrets.apiKey) {
+  //       throw Error("Need to set OPENAI_KEY environment variable");
+  //   }
 
-  // make sure arguments are provided
-  if (!args || args.length === 0) throw new Error("input not provided");
+  //   const openAIRequest = Functions.makeHttpRequest({
+  //       url: "https://api.openai.com/v1/chat/completions",
+  //       method: "POST",
+  //       headers: {
+  //           'Authorization': \`Bearer \${secrets.apiKey}\`,
+  //           'Content-Type': 'application/json'
+  //       },
+  //       data: JSON.stringify({
+  //           "model": "gpt-3.5-turbo",
+  //           "messages": [{"role": "user", "content": "Say this is a test!"}],
+  //           "temperature": 0,
+  //       })
+  //   });
 
-  const sum = args.reduce((accumulator, currentValue) => {
-  const numValue = parseInt(currentValue);
-  if (isNaN(numValue)) throw Error(\`\${currentValue} is not a number\`);
-  return accumulator + numValue;
-  },0); // calculate the sum of numbers provided in args array
+  //   const [openAiResponse] = await Promise.all([openAIRequest]);
 
-  console.log(\`sum is: \${sum}\`);
+  //   const result = openAiResponse.data.choices[0].message.content;
 
-  // Functions.encodeInt256: Return a buffer from int256
-  return Functions.encodeInt256(sum);
-  `;
+  //   console.log(result);
+  //   return Functions.encodeString(result);
+  // `;
 
-  const args = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+  const source = fs
+    .readFileSync(path.resolve(__dirname, "source.js"))
+    .toString();
+
   const gasLimit = 300000;
 
   //////// MAKE REQUEST ////////
@@ -60,6 +84,38 @@ const makeRequestMumbai = async () => {
   const wallet = new ethers.Wallet(privateKey);
   const signer = wallet.connect(provider); // create ethers signer for signing transactions
 
+  // First encrypt secrets and upload the encrypted secrets to the DON
+  const secretsManager = new SecretsManager({
+    signer: signer,
+    functionsRouterAddress: routerAddress,
+    donId: donId,
+  });
+  await secretsManager.initialize();
+
+  // Encrypt secrets and upload to DON
+  const encryptedSecretsObj = await secretsManager.encryptSecrets(secrets);
+
+  console.log(
+    `Upload encrypted secret to gateways ${gatewayUrls}. slotId ${slotIdNumber}. Expiration in minutes: ${expirationTimeMinutes}`
+  );
+  // Upload secrets
+  const uploadResult = await secretsManager.uploadEncryptedSecretsToDON({
+    encryptedSecretsHexstring: encryptedSecretsObj.encryptedSecrets,
+    gatewayUrls: gatewayUrls,
+    slotId: slotIdNumber,
+    minutesUntilExpiration: expirationTimeMinutes,
+  });
+
+  if (!uploadResult.success)
+    throw new Error(`Encrypted secrets not uploaded to ${gatewayUrls}`);
+
+  console.log(
+    `\n✅ Secrets uploaded properly to gateways ${gatewayUrls}! Gateways response: `,
+    uploadResult
+  );
+
+  const donHostedSecretsVersion = parseInt(uploadResult.version);
+
   const functionsConsumer = new ethers.Contract(
     consumerAddress,
     functionsConsumerAbi,
@@ -70,8 +126,8 @@ const makeRequestMumbai = async () => {
   const requestId = await functionsConsumer.callStatic.sendRequest(
     source, // source
     "0x", // user hosted secrets - encryptedSecretsUrls - empty in this example
-    0, // don hosted secrets - slot ID - empty in this example
-    0, // don hosted secrets - version - empty in this example
+    slotIdNumber, // don hosted secrets - slot ID - empty in this example
+    donHostedSecretsVersion, // don hosted secrets - version - empty in this example
     args,
     [], // bytesArgs - arguments can be encoded off-chain to bytes.
     subscriptionId,
@@ -84,7 +140,7 @@ const makeRequestMumbai = async () => {
     source, // source
     "0x", // user hosted secrets - encryptedSecretsUrls - empty in this example
     0, // don hosted secrets - slot ID - empty in this example
-    0, // don hosted secrets - version - empty in this example
+    donHostedSecretsVersion, // don hosted secrets - version - empty in this example
     args,
     [], // bytesArgs - arguments can be encoded off-chain to bytes.
     subscriptionId,
